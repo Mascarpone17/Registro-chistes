@@ -6,9 +6,13 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Cuenta admin (moderación: puede borrar cualquier chiste).
+    // Cuenta admin: puede borrar cualquier chiste y dar o quitar el verificado.
+    // Exige el email confirmado: Firebase deja crear una cuenta con cualquier
+    // email sin probar que es tuyo, así que sin esto alguien podría registrarse
+    // con este email y quedar como admin.
     function isAdmin() {
-      return signedIn() && request.auth.token.email == 'reyesblas200910@gmail.com';
+      return signedIn() && request.auth.token.email == 'reyesblas200910@gmail.com'
+        && request.auth.token.email_verified == true;
     }
 
     // Deben coincidir con LANGS y CATEGORIES en app.js.
@@ -21,17 +25,29 @@ service cloud.firestore {
     }
 
     // Autores: perfiles públicos (cualquiera puede leerlos, incluso sin cuenta).
-    // Cada persona crea y edita solo el suyo.
-    match /users/{uid} {
-      allow read: if true;
-      allow create, update: if signedIn() && request.auth.uid == uid
-        && request.resource.data.displayName is string
+    // Cada persona crea y edita solo el suyo, pero no puede tocar su campo
+    // "verified": ese solo lo escribe la cuenta admin (en cualquier perfil,
+    // incluido el propio).
+    function validProfile() {
+      return request.resource.data.displayName is string
         && request.resource.data.displayName.size() > 0
         && request.resource.data.displayName.size() <= 60;
+    }
+    match /users/{uid} {
+      allow read: if true;
+      allow create: if signedIn() && request.auth.uid == uid && validProfile()
+        && !('verified' in request.resource.data);
+      allow update: if signedIn() && (
+        (request.auth.uid == uid && validProfile()
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['verified']))
+        || (isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['verified'])
+          && request.resource.data.verified is bool)
+      );
       allow delete: if false;
     }
 
-    // Chistes registrados. Lectura pública.
+    // Chistes registrados. Lectura pública. "anonymous" marca los chistes de
+    // autor desconocido: authorId es entonces quien lo aportó.
     // Al crear: el autor tiene que ser quien publica, la fecha tiene que ser la
     // del servidor (no se puede antedatar un registro), y en el mismo batch se
     // tiene que crear su huella en /huellas — así un texto idéntico no se puede
@@ -49,6 +65,7 @@ service cloud.firestore {
         && validLang(request.resource.data.lang)
         && validCategory(request.resource.data.category)
         && request.resource.data.fingerprint is string
+        && request.resource.data.get('anonymous', false) is bool
         && getAfter(/databases/$(database)/documents/huellas/$(request.resource.data.fingerprint)).data.jokeId == id;
       allow update: if signedIn()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['laughs'])

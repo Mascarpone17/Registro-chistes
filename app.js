@@ -154,8 +154,34 @@
     toastTimer = setTimeout(function(){ toastEl.hidden = true; }, 2800);
   }
   function isAdmin(){
-    return !!(currentUser && currentUser.email === ADMIN_EMAIL);
+    return !!(currentUser && currentUser.email === ADMIN_EMAIL && currentUser.emailVerified);
   }
+  function canDeleteJoke(j){
+    return !!(currentUser && (currentUser.uid === j.authorId || isAdmin()));
+  }
+
+  // Perfiles de autores ya leídos, para mostrar la insignia de verificado
+  // junto a su nombre en tarjetas y certificados.
+  var authorsCache = {};
+  function loadAuthors(ids){
+    if(!FB_READY) return Promise.resolve();
+    var missing = ids.filter(function(id, i){ return id && !authorsCache[id] && ids.indexOf(id) === i; });
+    var chunks = [];
+    for(var i = 0; i < missing.length; i += 30) chunks.push(missing.slice(i, i + 30));
+    return Promise.all(chunks.map(function(chunk){
+      return db.collection("users").where(firebase.firestore.FieldPath.documentId(), "in", chunk).get().then(function(snap){
+        snap.forEach(function(d){ authorsCache[d.id] = d.data(); });
+      });
+    })).catch(function(){});
+  }
+  function verifiedBadge(uid){
+    return authorsCache[uid] && authorsCache[uid].verified
+      ? '<span class="verified" title="Autor verificado" role="img" aria-label="verificado">✓</span>' : "";
+  }
+  function authorLinkHtml(j){
+    return '<a href="#/autor/' + escapeHtml(j.authorId) + '">' + escapeHtml(j.authorName) + "</a>" + verifiedBadge(j.authorId);
+  }
+
   function laughedIds(){
     return (currentProfile && currentProfile.laughedJokeIds) || [];
   }
@@ -209,7 +235,7 @@
     return "<" + tag + ' class="joke" dir="auto"' + (l ? ' lang="' + l + '"' : "") + ">" + escapeHtml(text) + "</" + tag + ">";
   }
   function jokeCardHtml(j){
-    return '<article class="card">' +
+    return '<article class="card' + (j.anonymous ? " anon" : "") + '">' +
       '<div class="card-head">' +
         '<a class="folio" href="#/chiste/' + escapeHtml(j.id) + '">' + folioFor(j) + "</a>" +
         '<div class="card-tags">' +
@@ -219,9 +245,12 @@
       "</div>" +
       '<a class="joke-link" href="#/chiste/' + escapeHtml(j.id) + '">' + jokeTextHtml(j.text, j.lang) + "</a>" +
       '<div class="card-foot">' +
-        '<span class="byline">Registrado por <a href="#/autor/' + escapeHtml(j.authorId) + '">' + escapeHtml(j.authorName) + "</a>" +
+        '<span class="byline">' + (j.anonymous ? "Autor desconocido · aportado por " : "Registrado por ") + authorLinkHtml(j) +
           (j.authorCountry ? " · " + escapeHtml(j.authorCountry) : "") + "<br>" + formatDate(j.createdAt) + "</span>" +
-        laughBtnHtml(j) +
+        '<div class="card-actions">' +
+          (canDeleteJoke(j) ? '<button type="button" class="mini-del" data-delete="' + escapeHtml(j.id) + '" data-fp="' + escapeHtml(j.fingerprint) + '">Borrar</button>' : "") +
+          laughBtnHtml(j) +
+        "</div>" +
       "</div>" +
     "</article>";
   }
@@ -266,7 +295,8 @@
   function renderNavAuth(){
     if(currentUser){
       var name = currentProfile && currentProfile.displayName || "Mi perfil";
-      navAuth.innerHTML = '<a href="#/autor/' + currentUser.uid + '" data-nav="yo">' + escapeHtml(name) + "</a>";
+      navAuth.innerHTML = (isAdmin() ? '<a href="#/admin" data-nav="admin">Admin</a>' : "") +
+        '<a href="#/autor/' + currentUser.uid + '" data-nav="yo">' + escapeHtml(name) + "</a>";
     } else {
       navAuth.innerHTML = '<a href="#/entrar" data-nav="entrar">Entrar</a>';
     }
@@ -289,7 +319,8 @@
       autor: viewAuthor,
       publicar: viewPublish,
       entrar: viewLogin,
-      perfil: viewProfile
+      perfil: viewProfile,
+      admin: viewAdmin
     };
     (views[route.name] || viewNotFound)(route, token);
   }
@@ -364,9 +395,12 @@
     db.collection("jokes").orderBy("createdAt", "desc").limit(6).get().then(function(snap){
       if(stale(token)) return;
       var items = snap.docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
+      return loadAuthors(items.map(function(j){ return j.authorId; })).then(function(){
+      if(stale(token)) return;
       document.getElementById("recent").innerHTML = items.length
         ? '<div class="grid">' + items.map(jokeCardHtml).join("") + "</div>"
         : '<div class="empty"><b>El libro está en blanco.</b>Todavía nadie registró un chiste. <a href="#/publicar">Sé el primero</a>.</div>';
+      });
     }).catch(function(err){
       if(stale(token)) return;
       document.getElementById("recent").innerHTML = '<div class="alert">' + escapeHtml(friendlyError(err)) + "</div>";
@@ -376,10 +410,13 @@
   // ---------------------------------------------------------------------
   // listados (registro y patrimonio comparten filtros)
   // ---------------------------------------------------------------------
-  function filtersHtml(base, params, sortOptions){
+  function filtersHtml(base, params, sortOptions, withAuthorship){
     return '<div class="toolbar">' +
       '<select data-filter="lang" aria-label="Idioma">' + langOptions(params.lang, true) + "</select>" +
       '<select data-filter="cat" aria-label="Categoría">' + catOptions(params.cat, true) + "</select>" +
+      (withAuthorship
+        ? '<select id="authorshipSel" aria-label="Autoría"><option value="">Toda autoría</option><option value="own">Con autor</option><option value="anon">Autor desconocido</option></select>'
+        : "") +
       '<select id="sortSel" aria-label="Orden">' + sortOptions + "</select>" +
       '<input class="search" type="search" id="searchBox" placeholder="Buscar en el texto…" aria-label="Buscar" />' +
     "</div>" +
@@ -401,6 +438,7 @@
   }
   // Ordena, filtra por búsqueda y pinta. getItems() devuelve la lista base.
   function setupList(items, cardFn, sortFn, randomHref){
+    var authorshipSel = document.getElementById("authorshipSel");
     var listEl = document.getElementById("list");
     var countEl = document.getElementById("resultCount");
     var sortSel = document.getElementById("sortSel");
@@ -408,7 +446,12 @@
     var shown = [];
     function paint(){
       var q = normalizeText(searchBox.value);
-      shown = items.filter(function(it){ return !q || normalizeText(it.text).indexOf(q) >= 0; });
+      var who = authorshipSel ? authorshipSel.value : "";
+      shown = items.filter(function(it){
+        if(who === "own" && it.anonymous) return false;
+        if(who === "anon" && !it.anonymous) return false;
+        return !q || normalizeText(it.text).indexOf(q) >= 0;
+      });
       shown = sortFn(shown.slice(), sortSel.value);
       countEl.textContent = plural(shown.length, "chiste", "chistes");
       listEl.innerHTML = shown.length
@@ -416,6 +459,7 @@
         : '<div class="empty"><b>Nada por acá.</b>No hay chistes con estos filtros todavía.</div>';
     }
     sortSel.addEventListener("change", paint);
+    if(authorshipSel) authorshipSel.addEventListener("change", paint);
     searchBox.addEventListener("input", paint);
     document.getElementById("randomBtn").addEventListener("click", function(){
       if(!shown.length) return toast("No hay chistes para elegir.");
@@ -445,7 +489,7 @@
       '<p class="lede">Chistes publicados a nombre de sus autores, divididos por idioma y categoría.</p>' +
       (FB_READY
         ? '<div style="margin-top:20px">' + langChipsHtml("registro", params, null) + "</div>" +
-          filtersHtml("registro", params, '<option value="recent">Más recientes</option><option value="laughs">Más risas</option><option value="old">Más antiguos</option>')
+          filtersHtml("registro", params, '<option value="recent">Más recientes</option><option value="laughs">Más risas</option><option value="old">Más antiguos</option>', true)
         : '<div style="margin-top:20px">' + notConfiguredHtml() + "</div>");
     if(!FB_READY) return;
     bindFilters("registro", params);
@@ -459,12 +503,15 @@
     q.limit(300).get().then(function(snap){
       if(stale(token)) return;
       var items = snap.docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
+      return loadAuthors(items.map(function(j){ return j.authorId; })).then(function(){
+      if(stale(token)) return;
       setupList(items, jokeCardHtml, function(list, mode){
         function t(j){ var d = toDate(j.createdAt); return d ? d.getTime() : Date.now(); }
         if(mode === "laughs") return list.sort(function(a, b){ return (b.laughs || 0) - (a.laughs || 0) || t(b) - t(a); });
         if(mode === "old") return list.sort(function(a, b){ return t(a) - t(b); });
         return list.sort(function(a, b){ return t(b) - t(a); });
       }, function(j){ return "#/chiste/" + j.id; });
+      });
     }).catch(function(err){
       if(stale(token)) return;
       document.getElementById("list").innerHTML = '<div class="alert">' + escapeHtml(friendlyError(err)) + "</div>";
@@ -530,23 +577,29 @@
   function viewJoke(route, token){
     if(!FB_READY){ main.innerHTML = notConfiguredHtml(); return; }
     main.innerHTML = '<p class="loading">Buscando el folio…</p>';
+    var j;
     db.collection("jokes").doc(route.arg).get().then(function(doc){
+      if(!doc.exists) return;
+      j = Object.assign({ id: doc.id }, doc.data());
+      return loadAuthors([j.authorId]);
+    }).then(function(){
       if(stale(token)) return;
-      if(!doc.exists) return viewNotFound();
-      var j = Object.assign({ id: doc.id }, doc.data());
-      var canDelete = currentUser && (currentUser.uid === j.authorId || isAdmin());
+      if(!j) return viewNotFound();
+      var canDelete = canDeleteJoke(j);
       var fresh = route.params.nuevo === "1";
       document.title = folioFor(j) + " · Registro Internacional del Chiste";
       main.innerHTML =
-        (fresh ? '<div class="fresh" role="status">¡Registrado! Este es el certificado de tu chiste. Guardá el link o imprimilo.</div>' : "") +
+        (fresh ? '<div class="fresh" role="status">' + (j.anonymous ? "¡Aportado! Este es el certificado del chiste." : "¡Registrado! Este es el certificado de tu chiste.") + " Guardá el link o imprimilo.</div>" : "") +
         '<div class="cert"><div class="cert-inner">' +
           '<div class="cert-top">' +
-            '<div><p class="eyebrow">Certificado de registro</p><h1>Chiste registrado</h1></div>' +
+            '<div><p class="eyebrow">Certificado de registro</p><h1>' + (j.anonymous ? "Chiste de autor desconocido" : "Chiste registrado") + "</h1></div>" +
             '<div class="cert-folio"><span>Folio</span><b>' + folioFor(j) + "</b></div>" +
           "</div>" +
           jokeTextHtml(j.text, j.lang, "blockquote") +
           '<div class="cert-body">' +
-            "<p>Se certifica que el chiste arriba transcripto fue registrado a nombre de <strong>" + escapeHtml(j.authorName) + "</strong>" +
+            (j.anonymous
+              ? "<p>Se certifica que el chiste arriba transcripto, de <strong>autor desconocido</strong>, fue aportado al registro por <strong>" + escapeHtml(j.authorName) + "</strong>" + verifiedBadge(j.authorId)
+              : "<p>Se certifica que el chiste arriba transcripto fue registrado a nombre de <strong>" + escapeHtml(j.authorName) + "</strong>" + verifiedBadge(j.authorId)) +
             (j.authorCountry ? " (" + escapeHtml(j.authorCountry) + ")" : "") +
             " el día <strong>" + formatDateTime(j.createdAt) + "</strong>, en idioma <strong>" + escapeHtml(langLabel(j.lang)) +
             "</strong> y en la categoría <strong>" + escapeHtml(catLabel(j.category)) + "</strong>.</p>" +
@@ -556,7 +609,7 @@
         "</div></div>" +
         '<div class="cert-actions">' +
           '<div class="btn-row">' + laughBtnHtml(j) +
-            '<a class="btn ghost" href="#/autor/' + escapeHtml(j.authorId) + '">Más de ' + escapeHtml(j.authorName) + "</a>" +
+            '<a class="btn ghost" href="#/autor/' + escapeHtml(j.authorId) + '">' + (j.anonymous ? "Más aportes de " : "Más de ") + escapeHtml(j.authorName) + "</a>" +
           "</div>" +
           '<div class="btn-row">' +
             '<button type="button" class="btn ghost" data-share>Compartir</button>' +
@@ -584,28 +637,39 @@
       if(stale(token)) return;
       if(!res[0].exists) return viewNotFound();
       var u = res[0].data();
+      authorsCache[uid] = u;
       var jokes = res[1].docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
       jokes.sort(function(a, b){
         var ta = toDate(a.createdAt), tb = toDate(b.createdAt);
         return (tb ? tb.getTime() : 0) - (ta ? ta.getTime() : 0);
       });
-      var laughs = jokes.reduce(function(s, j){ return s + (j.laughs || 0); }, 0);
+      var own = jokes.filter(function(j){ return !j.anonymous; });
+      var anon = jokes.filter(function(j){ return j.anonymous; });
+      var laughs = own.reduce(function(s, j){ return s + (j.laughs || 0); }, 0);
       var isMe = currentUser && currentUser.uid === uid;
       document.title = u.displayName + " · Registro Internacional del Chiste";
       main.innerHTML =
         '<div class="author-head">' +
           '<span class="avatar" aria-hidden="true">' + escapeHtml(initials(u.displayName)) + "</span>" +
-          "<div><p class=\"eyebrow\">Autor registrado</p><h1>" + escapeHtml(u.displayName) + "</h1>" +
-            '<p class="muted">' + (u.country ? escapeHtml(u.country) + " · " : "") + plural(jokes.length, "chiste registrado", "chistes registrados") +
-            " · " + plural(laughs, "risa", "risas") + "</p></div>" +
+          "<div><p class=\"eyebrow\">" + (u.verified ? "Autor verificado" : "Autor registrado") + "</p><h1>" + escapeHtml(u.displayName) + verifiedBadge(uid) + "</h1>" +
+            '<p class="muted">' + (u.country ? escapeHtml(u.country) + " · " : "") + plural(own.length, "chiste registrado", "chistes registrados") +
+            " · " + plural(laughs, "risa", "risas") + (anon.length ? " · " + plural(anon.length, "aporte", "aportes") + " de autor desconocido" : "") + "</p></div>" +
         "</div>" +
+        (isAdmin()
+          ? '<div class="admin-bar"><span class="mono">ADMIN</span><button type="button" class="btn ghost" data-verify="' + escapeHtml(uid) + '" data-on="' + (!!u.verified) + '">' +
+              (u.verified ? "Quitar verificado" : "Dar verificado") + "</button></div>"
+          : "") +
         (u.bio ? '<p class="lede">' + escapeHtml(u.bio) + "</p>" : "") +
         (isMe ? '<div class="btn-row" style="margin-top:16px"><a class="btn" href="#/publicar">Registrar un chiste</a><a class="btn ghost" href="#/perfil">Editar perfil</a></div>' : "") +
         '<section class="section"><div class="section-head"><h2>Chistes a su nombre</h2></div>' +
-          (jokes.length
-            ? '<div class="grid">' + jokes.map(jokeCardHtml).join("") + "</div>"
+          (own.length
+            ? '<div class="grid">' + own.map(jokeCardHtml).join("") + "</div>"
             : '<div class="empty"><b>Sin registros todavía.</b>' + (isMe ? '<a href="#/publicar">Registrá tu primer chiste</a>.' : "") + "</div>") +
-        "</section>";
+        "</section>" +
+        (anon.length
+          ? '<section class="section"><div class="section-head"><h2>Aportes de autor desconocido</h2></div>' +
+              '<div class="grid">' + anon.map(jokeCardHtml).join("") + "</div></section>"
+          : "");
     }).catch(function(err){
       if(stale(token)) return;
       main.innerHTML = '<div class="alert">' + escapeHtml(friendlyError(err)) + "</div>";
@@ -626,7 +690,7 @@
       '<div class="narrow">' +
         '<p class="eyebrow">Nuevo registro</p>' +
         "<h1>Registrar un chiste</h1>" +
-        '<p class="lede">Va a quedar a nombre de <b>' + escapeHtml(currentProfile.displayName) + "</b>, con la fecha de hoy. Una vez registrado, el texto no se puede editar.</p>" +
+        '<p class="lede">Registrá un chiste tuyo a tu nombre, o aportá uno que circula y no sabés de quién es. Queda con la fecha de hoy y, una vez registrado, el texto no se puede editar.</p>' +
         '<form class="panel" id="publishForm" style="margin-top:20px" novalidate>' +
           '<div id="formMsg"></div>' +
           '<label class="field"><span>El chiste</span>' +
@@ -636,8 +700,14 @@
             '<label class="field"><span>Idioma</span><select name="lang" required>' + langOptions(guessLang(), false) + "</select></label>" +
             '<label class="field"><span>Categoría</span><select name="category" required>' + catOptions("", false) + "</select></label>" +
           "</div>" +
-          '<label class="check"><input type="checkbox" name="declare" required /> <span>Declaro que este chiste es de mi autoría, o que lo publico de buena fe sin conocer otro autor, y que no es un clásico de tradición oral.</span></label>' +
-          '<button class="btn" type="submit">Registrar a mi nombre</button>' +
+          '<fieldset class="choices"><legend>¿De quién es?</legend>' +
+            '<label class="choice"><input type="radio" name="authorship" value="own" checked /><span><b>Es mío</b>' +
+              "<small>Queda registrado a nombre de " + escapeHtml(currentProfile.displayName) + ".</small></span></label>" +
+            '<label class="choice"><input type="radio" name="authorship" value="anon" /><span><b>Autor desconocido</b>' +
+              "<small>Lo escuché por ahí y no sé de quién es. Queda como «autor desconocido», aportado por vos.</small></span></label>" +
+          "</fieldset>" +
+          '<label class="check"><input type="checkbox" name="declare" required /> <span id="declareText">Declaro que este chiste es de mi autoría y que no es un clásico de tradición oral.</span></label>' +
+          '<button class="btn" type="submit" id="submitBtn">Registrar a mi nombre</button>' +
         "</form>" +
       "</div>";
 
@@ -645,6 +715,17 @@
     var msg = document.getElementById("formMsg");
     var counter = document.getElementById("charCount");
     form.text.addEventListener("input", function(){ counter.textContent = form.text.value.length; });
+    var submitBtn = document.getElementById("submitBtn");
+    function isAnon(){ return form.authorship.value === "anon"; }
+    function submitLabel(){ return isAnon() ? "Aportar al registro" : "Registrar a mi nombre"; }
+    Array.prototype.forEach.call(form.authorship, function(radio){
+      radio.addEventListener("change", function(){
+        submitBtn.textContent = submitLabel();
+        document.getElementById("declareText").textContent = isAnon()
+          ? "Declaro que no conozco al autor de este chiste, que no es mío y que no es un clásico de tradición oral."
+          : "Declaro que este chiste es de mi autoría y que no es un clásico de tradición oral.";
+      });
+    });
 
     form.addEventListener("submit", function(e){
       e.preventDefault();
@@ -652,6 +733,7 @@
       var text = form.text.value.replace(/\r\n/g, "\n").trim();
       var lang = form.lang.value;
       var category = form.category.value;
+      var anonymous = isAnon();
       function fail(html){ msg.innerHTML = '<div class="alert">' + html + "</div>"; msg.scrollIntoView({ block:"center" }); }
 
       if(!normalizeText(text)) return fail("Escribí el chiste.");
@@ -665,9 +747,9 @@
           '<a href="#/patrimonio/' + pat.id + '">Ver la ficha</a>.');
       }
 
-      var btn = form.querySelector("button[type=submit]");
+      var btn = submitBtn;
       btn.disabled = true; btn.textContent = "Registrando…";
-      function restore(){ btn.disabled = false; btn.textContent = "Registrar a mi nombre"; }
+      function restore(){ btn.disabled = false; btn.textContent = submitLabel(); }
 
       var fingerprint;
       sha256Hex(normalizeText(text).replace(/ /g, "")).then(function(fp){
@@ -677,7 +759,9 @@
         if(existing.exists){
           var h = existing.data();
           restore();
-          return fail("Este chiste ya está registrado a nombre de <b>" + escapeHtml(h.authorName) + "</b>. " +
+          return fail((h.anonymous
+              ? "Este chiste ya está en el registro como de autor desconocido (lo aportó <b>" + escapeHtml(h.authorName) + "</b>). "
+              : "Este chiste ya está registrado a nombre de <b>" + escapeHtml(h.authorName) + "</b>. ") +
             '<a href="#/chiste/' + escapeHtml(h.jokeId) + '">Ver el certificado</a>.');
         }
         var jokeRef = db.collection("jokes").doc();
@@ -690,6 +774,7 @@
           authorName: currentProfile.displayName,
           authorCountry: currentProfile.country || "",
           fingerprint: fingerprint,
+          anonymous: anonymous,
           laughs: 0,
           createdAt: FieldValue.serverTimestamp()
         });
@@ -697,6 +782,7 @@
           jokeId: jokeRef.id,
           authorId: currentUser.uid,
           authorName: currentProfile.displayName,
+          anonymous: anonymous,
           createdAt: FieldValue.serverTimestamp()
         });
         return batch.commit().then(function(){
@@ -808,6 +894,11 @@
           "</div>" +
         "</form>" +
         '<p class="muted" style="margin-top:12px">Sesión iniciada como ' + escapeHtml(currentUser.email) + ".</p>" +
+        (currentUser.email === ADMIN_EMAIL && !currentUser.emailVerified
+          ? '<div class="alert info" style="margin-top:12px">Esta es la cuenta admin, pero su email todavía no está confirmado, así que los permisos de admin están desactivados. ' +
+              '<button type="button" class="linkbtn" id="verifyEmailBtn">Mandarme el email de confirmación</button>. ' +
+              "Después de tocar el link del email, cerrá sesión y volvé a entrar.</div>"
+          : "") +
       "</div>";
 
     var form = document.getElementById("profileForm");
@@ -830,8 +921,73 @@
         document.getElementById("formMsg").innerHTML = '<div class="alert">' + escapeHtml(friendlyError(err)) + "</div>";
       });
     });
+    var verifyEmailBtn = document.getElementById("verifyEmailBtn");
+    if(verifyEmailBtn) verifyEmailBtn.addEventListener("click", function(){
+      currentUser.sendEmailVerification().then(function(){
+        toast("Listo: revisá tu correo (también la carpeta de spam).");
+      }).catch(function(err){ toast(friendlyError(err)); });
+    });
     document.getElementById("logoutBtn").addEventListener("click", function(){
       auth.signOut().then(function(){ go("#/"); });
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // admin: dar o quitar verificado
+  // ---------------------------------------------------------------------
+  function viewAdmin(route, token){
+    document.title = "Admin · Registro Internacional del Chiste";
+    if(!FB_READY){ main.innerHTML = notConfiguredHtml(); return; }
+    if(!authResolved){ main.innerHTML = '<p class="loading">Un momento…</p>'; return; }
+    if(!isAdmin()) return viewNotFound();
+    main.innerHTML =
+      '<p class="eyebrow">Administración</p><h1>Autores</h1>' +
+      '<p class="lede">Dale o sacale la insignia de verificado a cualquier autor, incluido vos. Para borrar un chiste, usá el botón «Borrar» de su tarjeta o de su certificado.</p>' +
+      '<div class="toolbar"><input class="search" type="search" id="userSearch" placeholder="Buscar por nombre o país…" aria-label="Buscar autor" /></div>' +
+      '<p class="result-meta"><span id="resultCount"></span></p>' +
+      '<div id="list"><p class="loading">Cargando autores…</p></div>';
+    db.collection("users").limit(1000).get().then(function(snap){
+      if(stale(token)) return;
+      var users = snap.docs.map(function(d){ authorsCache[d.id] = d.data(); return Object.assign({ uid: d.id }, d.data()); });
+      users.sort(function(a, b){ return (a.displayName || "").localeCompare(b.displayName || ""); });
+      var box = document.getElementById("userSearch");
+      function paint(){
+        var q = normalizeText(box.value);
+        var shown = users.filter(function(u){ return !q || normalizeText(u.displayName + " " + (u.country || "")).indexOf(q) >= 0; });
+        document.getElementById("resultCount").textContent = plural(shown.length, "autor", "autores") +
+          " · " + plural(users.filter(function(u){ return authorsCache[u.uid].verified; }).length, "verificado", "verificados");
+        document.getElementById("list").innerHTML = shown.length
+          ? '<ul class="user-list">' + shown.map(function(u){
+              var on = !!authorsCache[u.uid].verified;
+              return '<li><a href="#/autor/' + escapeHtml(u.uid) + '"><b>' + escapeHtml(u.displayName) + "</b>" + verifiedBadge(u.uid) + "</a>" +
+                '<span class="muted">' + escapeHtml(u.country || "") + (currentUser.uid === u.uid ? " (vos)" : "") + "</span>" +
+                '<button type="button" class="btn ' + (on ? "ghost" : "") + '" data-verify="' + escapeHtml(u.uid) + '" data-on="' + on + '">' +
+                  (on ? "Quitar verificado" : "Dar verificado") + "</button></li>";
+            }).join("") + "</ul>"
+          : '<div class="empty"><b>Nadie con ese nombre.</b></div>';
+      }
+      box.addEventListener("input", paint);
+      main.repaintAdmin = paint;
+      paint();
+    }).catch(function(err){
+      if(stale(token)) return;
+      document.getElementById("list").innerHTML = '<div class="alert">' + escapeHtml(friendlyError(err)) + "</div>";
+    });
+  }
+
+  function toggleVerified(btn){
+    if(!isAdmin()) return;
+    var uid = btn.getAttribute("data-verify");
+    var on = btn.getAttribute("data-on") !== "true";
+    btn.disabled = true;
+    db.collection("users").doc(uid).update({ verified: on }).then(function(){
+      if(authorsCache[uid]) authorsCache[uid].verified = on;
+      if(currentUser.uid === uid && currentProfile) currentProfile.verified = on;
+      toast(on ? "Autor verificado." : "Verificado quitado.");
+      if(parseHash().name === "admin" && main.repaintAdmin) main.repaintAdmin(); else render();
+    }).catch(function(err){
+      btn.disabled = false;
+      toast(friendlyError(err));
     });
   }
 
@@ -884,7 +1040,7 @@
     if(fp) batch.delete(db.collection("huellas").doc(fp));
     batch.commit().then(function(){
       toast("Chiste borrado del registro.");
-      go("#/registro");
+      if(parseHash().name === "chiste") go("#/registro"); else render();
     }).catch(function(err){
       btn.disabled = false;
       toast(friendlyError(err));
@@ -903,9 +1059,10 @@
   }
 
   main.addEventListener("click", function(e){
-    var t = e.target.closest("[data-laugh],[data-delete],[data-share],[data-print]");
+    var t = e.target.closest("[data-laugh],[data-delete],[data-share],[data-print],[data-verify]");
     if(!t) return;
     if(t.hasAttribute("data-laugh")) toggleLaugh(t);
+    else if(t.hasAttribute("data-verify")) toggleVerified(t);
     else if(t.hasAttribute("data-delete")) deleteJoke(t);
     else if(t.hasAttribute("data-share")) share();
     else if(t.hasAttribute("data-print")) window.print();

@@ -31,11 +31,25 @@ sin backend propio.
   - La fecha de registro la pone el servidor: no se puede antedatar.
   - Un chiste registrado no se puede editar, solo borrar (por su autor o por el admin).
     Al borrarlo, el texto queda libre para que otra persona lo registre.
+- **Autor desconocido**: al publicar se puede elegir "Es mío" o "Autor
+  desconocido" (un chiste que circula y no se sabe de quién es). Los de autor
+  desconocido quedan como aportados por quien los subió, aparecen en una sección
+  aparte de su página y se pueden filtrar en el registro. También están
+  protegidos contra duplicados.
 - **Risas**: el equivalente a un "me gusta". Se puede ordenar el registro por
   más risas.
 - **Páginas de autor**: nombre, país, biografía, total de risas y todos sus chistes.
-- **Moderación**: la cuenta admin (`reyesblas200910@gmail.com`, en
-  `firestore.rules` y `app.js`) puede borrar cualquier chiste.
+- **Administración**: la cuenta admin (`reyesblas200910@gmail.com`, en
+  `firestore.rules` y `app.js`) puede:
+  - borrar cualquier chiste (botón "Borrar" en cada tarjeta y en el certificado);
+  - dar o quitar la insignia de **verificado** ✓ a cualquier autor, incluida
+    ella misma, desde el panel **Admin** del menú o desde la página de cada autor.
+    Nadie más puede tocar ese campo, ni siquiera en su propio perfil.
+
+  Los permisos de admin exigen que el email de esa cuenta esté **confirmado**
+  (Firebase deja crear cuentas con cualquier email sin probar que es tuyo). Si
+  todavía no lo está, en **Mi perfil** aparece un botón para mandarte el email de
+  confirmación; después de tocar el link, cerrá sesión y volvé a entrar.
 - Lectura pública: no hace falta cuenta para leer el registro ni el Patrimonio,
   solo para publicar y reírse.
 
@@ -55,6 +69,9 @@ vitrina": se puede recorrer todo el Patrimonio y el registro muestra un aviso.
 
 No hace falta crear índices compuestos: las consultas solo combinan filtros de
 igualdad y el orden se aplica en el navegador.
+
+**Cada vez que cambie `firestore.rules`** hay que volver a pegarlo en
+Firestore → Reglas y publicar: el sitio no las sube solo.
 
 ## 2. Probarlo en tu computadora
 
@@ -84,11 +101,14 @@ firestore.rules     reglas de seguridad para pegar en Firestore → Reglas
 ## Modelo de datos (Firestore)
 
 ```
-users/{uid}      displayName, country, bio, laughedJokeIds[], createdAt
+users/{uid}      displayName, country, bio, laughedJokeIds[], verified, createdAt
 jokes/{id}       text, lang, category, authorId, authorName, authorCountry,
-                 fingerprint, laughs, createdAt
-huellas/{hash}   jokeId, authorId, authorName, createdAt
+                 fingerprint, anonymous, laughs, createdAt
+huellas/{hash}   jokeId, authorId, authorName, anonymous, createdAt
 ```
+
+En los chistes con `anonymous: true`, `authorId`/`authorName` son de quien lo
+aportó, no del autor (que es desconocido).
 
 `huellas` guarda el SHA-256 del texto normalizado de cada chiste. Las reglas
 exigen que cada chiste se cree junto con su huella, y una huella existente no
