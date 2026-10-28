@@ -12,12 +12,12 @@
 // todo el Patrimonio, pero el registro de chistes de usuarios queda desactivado.
 
 var firebaseConfig = {
-  apiKey: "TU_API_KEY",
-  authDomain: "TU_PROYECTO.firebaseapp.com",
-  projectId: "TU_PROYECTO",
-  storageBucket: "TU_PROYECTO.appspot.com",
-  messagingSenderId: "TU_SENDER_ID",
-  appId: "TU_APP_ID"
+  apiKey: "AIzaSyB0ZTn7XpFUPZERszX2hV4I-fa99i2QLFU",
+  authDomain: "registro-chistes.firebaseapp.com",
+  projectId: "registro-chistes",
+  storageBucket: "registro-chistes.firebasestorage.app",
+  messagingSenderId: "1045523203686",
+  appId: "1:1045523203686:web:ba2b686f0204098e868fa7"
 };
 
 if(firebaseConfig.apiKey.indexOf("TU_") !== 0){
